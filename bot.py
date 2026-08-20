@@ -198,22 +198,23 @@ class SignalBot(discord.Client):
         super().__init__(intents=discord.Intents.default())
         self.market = TwelveDataClient(TWELVE_DATA_API_KEY)
         self.last_alert = {}
-
-    async def setup_hook(self):
-        self.scan_task = asyncio.create_task(self.scanner_loop())
+        self.scan_task = None
 
     async def on_ready(self):
         log.info("Logged in as %s", self.user)
+        if self.scan_task is None or self.scan_task.done():
+            self.scan_task = asyncio.create_task(self.scanner_loop())
 
     async def get_target_channel(self):
-        ch = self.get_channel(DISCORD_CHANNEL_ID)
-        if ch is None:
-            try:
+        try:
+            ch = self.get_channel(DISCORD_CHANNEL_ID)
+            if ch is None:
                 ch = await self.fetch_channel(DISCORD_CHANNEL_ID)
-            except Exception as exc:
-                log.error("Could not access channel %s: %s", DISCORD_CHANNEL_ID, exc)
-                return None
-        return ch
+            log.info("Discord channel access confirmed: %s (%s)", getattr(ch, "name", "unknown"), DISCORD_CHANNEL_ID)
+            return ch
+        except Exception as exc:
+            log.exception("Could not access channel %s: %s", DISCORD_CHANNEL_ID, exc)
+            return None
 
     def cooldown_ok(self, symbol, direction):
         key = f"{symbol}:{direction}"
@@ -243,17 +244,21 @@ class SignalBot(discord.Client):
         await channel.send(embed=embed)
 
     async def scanner_loop(self):
-        await self.wait_until_ready()
         channel = await self.get_target_channel()
         if channel is None:
             return
 
-        await channel.send(
-            "✅ **Pocket Option signal scanner is online.**\n"
-            f"Scanning: {', '.join(SYMBOLS)}\n"
-            f"Alert threshold: {MIN_SIGNAL_SCORE}/100\n"
-            "Real-market pairs only; no automatic trade execution."
-        )
+        try:
+            await channel.send(
+                "✅ **Pocket Option signal scanner is online.**\n"
+                f"Scanning: {', '.join(SYMBOLS)}\n"
+                f"Alert threshold: {MIN_SIGNAL_SCORE}/100\n"
+                "Real-market pairs only; no automatic trade execution."
+            )
+            log.info("Startup message sent successfully to channel %s", DISCORD_CHANNEL_ID)
+        except Exception as exc:
+            log.exception("Failed to send startup message to channel %s: %s", DISCORD_CHANNEL_ID, exc)
+            return
 
         async with aiohttp.ClientSession() as session:
             while not self.is_closed():
@@ -275,9 +280,12 @@ class SignalBot(discord.Client):
                         continue
                     if not self.cooldown_ok(symbol, result["direction"]):
                         continue
-                    await self.send_signal(channel, symbol, result, rank)
-                    self.last_alert[f"{symbol}:{result['direction']}"] = datetime.now(timezone.utc)
-                    sent += 1
+                    try:
+                        await self.send_signal(channel, symbol, result, rank)
+                        self.last_alert[f"{symbol}:{result['direction']}"] = datetime.now(timezone.utc)
+                        sent += 1
+                    except Exception as exc:
+                        log.exception("Failed to send signal for %s: %s", symbol, exc)
                     if sent >= 2:
                         break
                 await asyncio.sleep(SCAN_INTERVAL_SECONDS)
